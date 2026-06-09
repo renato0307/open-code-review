@@ -1,5 +1,6 @@
 // Package llm provides LLM client interfaces supporting multiple protocols.
-// Supported protocols: Anthropic Messages API, OpenAI Chat Completions API.
+// Supported protocols: Anthropic Messages API, OpenAI Chat Completions API,
+// and Amazon Bedrock (Anthropic models via the AWS default credential chain).
 package llm
 
 import (
@@ -11,7 +12,9 @@ import (
 	"time"
 
 	anthropic "github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/bedrock"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	openai "github.com/openai/openai-go/v3"
 	openaiopt "github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/shared"
@@ -190,8 +193,10 @@ type ClientConfig struct {
 // --- Factory ---
 
 // NewLLMClient creates the appropriate client based on the resolved endpoint protocol.
-// protocol: "anthropic" -> AnthropicClient, anything else -> OpenAIClient.
-func NewLLMClient(ep ResolvedEndpoint) LLMClient {
+// "bedrock" -> Bedrock-backed AnthropicClient, "anthropic" -> AnthropicClient,
+// anything else -> OpenAIClient. An error is returned only when a client cannot be
+// constructed (currently Bedrock, which loads AWS configuration eagerly).
+func NewLLMClient(ep ResolvedEndpoint) (LLMClient, error) {
 	cfg := ClientConfig{
 		URL:        ep.URL,
 		APIKey:     ep.Token,
@@ -199,10 +204,57 @@ func NewLLMClient(ep ResolvedEndpoint) LLMClient {
 		AuthHeader: ep.AuthHeader,
 		ExtraBody:  ep.ExtraBody,
 	}
-	if ep.Protocol == "anthropic" {
-		return NewAnthropicClient(cfg)
+	switch ep.Protocol {
+	case protocolBedrock:
+		return NewBedrockClient(cfg)
+	case protocolAnthropic:
+		return NewAnthropicClient(cfg), nil
+	default:
+		return NewOpenAIClient(cfg), nil
 	}
-	return NewOpenAIClient(cfg)
+}
+
+// NewBedrockClient creates an Anthropic Messages API client that targets Amazon Bedrock.
+// Authentication and region come from the AWS default credential chain, which honors
+// AWS_PROFILE, AWS_REGION, AWS_BEARER_TOKEN_BEDROCK, shared config/credentials files,
+// and SSO. The endpoint and request signing are handled by the SDK's bedrock middleware,
+// so cfg.URL and cfg.APIKey are ignored.
+func NewBedrockClient(cfg ClientConfig) (*AnthropicClient, error) {
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 5 * time.Minute
+	}
+
+	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("load AWS config for Bedrock: %w", err)
+	}
+	if awsCfg.Region == "" {
+		return nil, fmt.Errorf("no AWS region configured for Bedrock; set AWS_REGION (or a region in your AWS profile)")
+	}
+
+	// SSO/token-based profiles make LoadDefaultConfig populate a bearer token provider
+	// (the SSO access token). The bedrock middleware prefers it over SigV4, but it is not
+	// a valid Bedrock API key. Clear it so signing uses the profile's SigV4 credentials.
+	// An explicit Bedrock API key via AWS_BEARER_TOKEN_BEDROCK is still honored by the
+	// middleware, which re-reads that env var when no provider is set.
+	awsCfg.BearerAuthTokenProvider = nil
+
+	// WithoutEnvironmentDefaults stops the SDK from auto-discovering Anthropic
+	// credentials (env vars, ~/.anthropic fallback profile / Claude Code OAuth) and
+	// attaching them. On Bedrock, auth is SigV4 via the bedrock middleware only; any
+	// stray Authorization/x-api-key header is rejected as an invalid Bedrock key.
+	opts := []option.RequestOption{
+		option.WithoutEnvironmentDefaults(),
+		option.WithMaxRetries(5),
+		option.WithHeader("User-Agent", userAgent("bedrock")),
+		option.WithRequestTimeout(cfg.Timeout),
+		bedrock.WithConfig(awsCfg),
+	}
+
+	return &AnthropicClient{
+		cfg: cfg,
+		sdk: anthropic.NewClient(opts...),
+	}, nil
 }
 
 // --- Token counting with tiktoken ---

@@ -14,11 +14,18 @@ type ResolvedEndpoint struct {
 	URL        string
 	Token      string
 	Model      string
-	Protocol   string         // "anthropic" or "openai"
+	Protocol   string         // "anthropic", "openai", or "bedrock"
 	AuthHeader string         // Anthropic auth header: "x-api-key" or "authorization"
 	Source     string         // human-readable config source label
 	ExtraBody  map[string]any // vendor-specific request body fields
 }
+
+// Supported LLM protocols.
+const (
+	protocolAnthropic = "anthropic"
+	protocolOpenAI    = "openai"
+	protocolBedrock   = "bedrock"
+)
 
 // Environment variable names for OCR-specific configuration.
 const (
@@ -55,7 +62,7 @@ func ResolveEndpoint(configPath string) (ResolvedEndpoint, error) {
 		if err != nil {
 			return ResolvedEndpoint{}, fmt.Errorf("resolve %s: %w", s.name, err)
 		}
-		if ok && ep.URL != "" && ep.Token != "" && ep.Model != "" {
+		if ok && endpointComplete(ep) {
 			ep.Source = s.name
 			ep.Model = stripModelSuffix(ep.Model)
 			return ep, nil
@@ -106,12 +113,54 @@ type llmFileConfig struct {
 	AuthToken    string         `json:"auth_token,omitempty"`
 	AuthHeader   string         `json:"auth_header,omitempty"`
 	Model        string         `json:"model,omitempty"`
-	UseAnthropic *bool          `json:"use_anthropic,omitempty"` // pointer to distinguish unset from false
+	Provider     string         `json:"provider,omitempty"`      // "anthropic", "openai", or "bedrock"; takes precedence over use_anthropic
+	UseAnthropic *bool          `json:"use_anthropic,omitempty"` // pointer to distinguish unset from false; kept for backward compatibility
 	ExtraBody    map[string]any `json:"extra_body,omitempty"`
 }
 
 type configFile struct {
 	Llm llmFileConfig `json:"llm,omitempty"`
+}
+
+// endpointComplete reports whether a resolved endpoint carries enough configuration to use.
+// Bedrock authenticates via the AWS default credential chain, so it needs only a model;
+// every other protocol needs a URL, token, and model.
+func endpointComplete(ep ResolvedEndpoint) bool {
+	if ep.Protocol == protocolBedrock {
+		return ep.Model != ""
+	}
+	return ep.URL != "" && ep.Token != "" && ep.Model != ""
+}
+
+// NormalizeProvider validates and canonicalizes an llm.provider value.
+// An empty string is returned unchanged (provider unset); unrecognized values error.
+func NormalizeProvider(provider string) (string, error) {
+	switch p := strings.ToLower(strings.TrimSpace(provider)); p {
+	case "":
+		return "", nil
+	case protocolAnthropic, protocolOpenAI, protocolBedrock:
+		return p, nil
+	default:
+		return "", fmt.Errorf("unsupported provider %q; expected %q, %q, or %q", provider, protocolAnthropic, protocolOpenAI, protocolBedrock)
+	}
+}
+
+// resolveProtocol maps the config-file provider/use_anthropic fields to a protocol.
+// The explicit provider field takes precedence; use_anthropic is consulted only when
+// provider is unset, preserving backward compatibility.
+func resolveProtocol(provider string, useAnthropic *bool) (string, error) {
+	p, err := NormalizeProvider(provider)
+	if err != nil {
+		return "", err
+	}
+	if p != "" {
+		return p, nil
+	}
+
+	if useAnthropic != nil && !*useAnthropic {
+		return protocolOpenAI, nil
+	}
+	return protocolAnthropic, nil
 }
 
 // tryOCRConfig reads the OCR config file.
@@ -129,23 +178,26 @@ func tryOCRConfig(path string) (ResolvedEndpoint, bool, error) {
 		return ResolvedEndpoint{}, false, fmt.Errorf("parse config: %w", err)
 	}
 
+	protocol, err := resolveProtocol(cfg.Llm.Provider, cfg.Llm.UseAnthropic)
+	if err != nil {
+		return ResolvedEndpoint{}, false, fmt.Errorf("OCR config file: %w", err)
+	}
+
+	if protocol == protocolBedrock {
+		// Bedrock authenticates via the AWS default credential chain (AWS_PROFILE /
+		// AWS_REGION / shared config), so only the model is required from the config file.
+		if cfg.Llm.Model == "" {
+			return ResolvedEndpoint{}, false, nil
+		}
+		return ResolvedEndpoint{Model: cfg.Llm.Model, Protocol: protocolBedrock, Source: "OCR config file", ExtraBody: cfg.Llm.ExtraBody}, true, nil
+	}
+
 	if cfg.Llm.URL == "" || cfg.Llm.AuthToken == "" || cfg.Llm.Model == "" {
 		return ResolvedEndpoint{}, false, nil
 	}
 
-	useAnthropic := true // default true
-	if cfg.Llm.UseAnthropic != nil {
-		useAnthropic = *cfg.Llm.UseAnthropic
-	}
-
-	protocol := "anthropic"
-	if !useAnthropic {
-		protocol = "openai"
-	}
-
 	var authHeader string
-	if protocol == "anthropic" {
-		var err error
+	if protocol == protocolAnthropic {
 		authHeader, err = NormalizeAuthHeader(cfg.Llm.AuthHeader)
 		if err != nil {
 			return ResolvedEndpoint{}, false, fmt.Errorf("OCR config file: %w", err)

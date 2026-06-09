@@ -58,7 +58,10 @@ func runLLMTest() error {
 		return fmt.Errorf("load default template: %w", err)
 	}
 
-	llmClient := llm.NewLLMClient(ep)
+	llmClient, err := llm.NewLLMClient(ep)
+	if err != nil {
+		return fmt.Errorf("create LLM client: %w", err)
+	}
 
 	messages := make([]llm.Message, 0, len(task.Messages))
 	for _, m := range task.Messages {

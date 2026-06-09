@@ -89,7 +89,10 @@ func runReview(args []string) error {
 		return fmt.Errorf("resolve LLM endpoint: %w", err)
 	}
 
-	llmClient := llm.NewLLMClient(ep)
+	llmClient, err := llm.NewLLMClient(ep)
+	if err != nil {
+		return fmt.Errorf("create LLM client: %w", err)
+	}
 	model := ep.Model
 
 	gitRunner := gitcmd.New(opts.maxGitProcs)

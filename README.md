@@ -139,6 +139,20 @@ export OCR_LLM_AUTH_HEADER=x-api-key
 
 Supported values: `x-api-key`, `authorization` (alias: `bearer`). Other values are rejected with an error.
 
+**`provider` (optional):** Selects the backend explicitly: `anthropic` (default), `openai`, or `bedrock`. It takes precedence over `use_anthropic`, which is kept for backward compatibility.
+
+**Amazon Bedrock:** Set `provider` to `bedrock` and a Bedrock model id; no `url` or `auth_token` is needed. Authentication and region come from the standard AWS credential chain, so it honors `AWS_PROFILE`, `AWS_REGION`, `AWS_BEARER_TOKEN_BEDROCK`, your shared `~/.aws/config` / `~/.aws/credentials`, and SSO.
+
+```bash
+ocr config set llm.provider bedrock
+ocr config set llm.model anthropic.claude-3-5-sonnet-20241022-v2:0
+
+export AWS_PROFILE=my-profile
+export AWS_REGION=us-east-1
+```
+
+A region must be resolvable (via `AWS_REGION` or your profile) or client creation fails with a clear error.
+
 It is also compatible with Claude Code environment variables (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`) and parses `~/.zshrc` / `~/.bashrc` for those exports.
 
 > **Note for CC-Switch Users**: If you are using [CC-Switch](https://github.com/farion1231/cc-switch) with [routing service](https://www.ccswitch.io/en/docs?section=proxy&item=service) enabled, you can point `llm.url` to the CC-Switch proxy address without additional configuration:
@@ -427,6 +441,7 @@ Config file: `~/.opencodereview/config.json`
 | `llm.auth_token` | string | `sk-xxxxxxx` |
 | `llm.auth_header` | string | Anthropic only: `x-api-key` \| `authorization` |
 | `llm.model` | string | `claude-opus-4-6` |
+| `llm.provider` | string | `anthropic` \| `openai` \| `bedrock` (takes precedence over `use_anthropic`) |
 | `llm.use_anthropic` | boolean | `true` \| `false` |
 | `language` | string | `English` \| `Chinese` (default: Chinese) |
 | `telemetry.enabled` | boolean | `true` \| `false` |

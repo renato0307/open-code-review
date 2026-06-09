@@ -211,6 +211,140 @@ func TestResolveEndpoint_ConfigOpenAIIgnoresAuthHeader(t *testing.T) {
 	}
 }
 
+func TestResolveEndpoint_ConfigBedrockNeedsOnlyModel(t *testing.T) {
+	t.Setenv("OCR_LLM_URL", "")
+	t.Setenv("OCR_LLM_TOKEN", "")
+	t.Setenv("OCR_LLM_MODEL", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("ANTHROPIC_MODEL", "")
+
+	cfg := configFile{
+		Llm: llmFileConfig{
+			Provider: "bedrock",
+			Model:    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+		},
+	}
+	data, _ := json.Marshal(cfg)
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(cfgPath, data, 0644)
+
+	ep, err := ResolveEndpoint(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ep.Protocol != "bedrock" {
+		t.Errorf("expected protocol %q, got %q", "bedrock", ep.Protocol)
+	}
+	if ep.Model != "anthropic.claude-3-5-sonnet-20241022-v2:0" {
+		t.Errorf("unexpected model %q", ep.Model)
+	}
+	if ep.URL != "" || ep.Token != "" || ep.AuthHeader != "" {
+		t.Errorf("expected empty URL/Token/AuthHeader for bedrock, got url=%q token=%q authHeader=%q", ep.URL, ep.Token, ep.AuthHeader)
+	}
+	if ep.Source != "OCR config file" {
+		t.Errorf("expected source %q, got %q", "OCR config file", ep.Source)
+	}
+}
+
+func TestResolveEndpoint_ConfigBedrockMissingModelFalls(t *testing.T) {
+	t.Setenv("OCR_LLM_URL", "")
+	t.Setenv("OCR_LLM_TOKEN", "")
+	t.Setenv("OCR_LLM_MODEL", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("ANTHROPIC_MODEL", "")
+
+	cfg := configFile{Llm: llmFileConfig{Provider: "bedrock"}}
+	data, _ := json.Marshal(cfg)
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(cfgPath, data, 0644)
+
+	// No model and no other source configured -> resolution must fail rather than
+	// silently accept an incomplete bedrock endpoint.
+	if _, err := ResolveEndpoint(cfgPath); err == nil {
+		t.Fatal("expected error when bedrock provider has no model and no fallback source")
+	}
+}
+
+func TestResolveEndpoint_ConfigInvalidProvider(t *testing.T) {
+	t.Setenv("OCR_LLM_URL", "")
+	t.Setenv("OCR_LLM_TOKEN", "")
+	t.Setenv("OCR_LLM_MODEL", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("ANTHROPIC_MODEL", "")
+
+	cfg := configFile{Llm: llmFileConfig{Provider: "vertex", Model: "x"}}
+	data, _ := json.Marshal(cfg)
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(cfgPath, data, 0644)
+
+	if _, err := ResolveEndpoint(cfgPath); err == nil {
+		t.Fatal("expected error for unsupported provider")
+	}
+}
+
+func TestResolveEndpoint_ProviderOverridesUseAnthropic(t *testing.T) {
+	t.Setenv("OCR_LLM_URL", "")
+	t.Setenv("OCR_LLM_TOKEN", "")
+	t.Setenv("OCR_LLM_MODEL", "")
+	t.Setenv("ANTHROPIC_BASE_URL", "")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("ANTHROPIC_MODEL", "")
+
+	useAnthropic := true // provider=openai must win over this
+	cfg := configFile{
+		Llm: llmFileConfig{
+			URL:          "https://api.openai.com/v1",
+			AuthToken:    "openai-token",
+			Model:        "gpt-4",
+			Provider:     "openai",
+			UseAnthropic: &useAnthropic,
+		},
+	}
+	data, _ := json.Marshal(cfg)
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	os.WriteFile(cfgPath, data, 0644)
+
+	ep, err := ResolveEndpoint(cfgPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ep.Protocol != "openai" {
+		t.Errorf("expected provider to override use_anthropic; got protocol %q", ep.Protocol)
+	}
+}
+
+func TestNormalizeProvider(t *testing.T) {
+	tests := []struct {
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{"", "", false},
+		{"anthropic", "anthropic", false},
+		{"OpenAI", "openai", false},
+		{" bedrock ", "bedrock", false},
+		{"vertex", "", true},
+	}
+	for _, tt := range tests {
+		got, err := NormalizeProvider(tt.input)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("NormalizeProvider(%q): expected error", tt.input)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("NormalizeProvider(%q): unexpected error %v", tt.input, err)
+		}
+		if got != tt.want {
+			t.Errorf("NormalizeProvider(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestResolveEndpoint_OCREnvAuthHeader(t *testing.T) {
 	t.Setenv("OCR_LLM_URL", "https://api.anthropic.com")
 	t.Setenv("OCR_LLM_TOKEN", "oauth-token")
